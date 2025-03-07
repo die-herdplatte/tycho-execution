@@ -258,6 +258,85 @@ impl SwapEncoder for BalancerV2SwapEncoder {
     }
 }
 
+/// Encodes a swap on a Uniswap V4 pool through the given executor address.
+///
+/// # Fields
+/// * `executor_address` - The address of the executor contract that will perform the swap.
+/// * `swap_selector` - The selector of the swap function in the executor contract.
+/// * `callback_selector` - The selector of the callback function in the executor contract.
+#[derive(Clone)]
+pub struct EkuboEncoder {
+    executor_address: String,
+}
+
+impl EkuboEncoder {
+    fn get_zero_to_one(sell_token_address: Address, buy_token_address: Address) -> bool {
+        sell_token_address < buy_token_address
+    }
+}
+
+impl SwapEncoder for EkuboEncoder {
+    fn new(executor_address: String) -> Self {
+        Self { executor_address }
+    }
+
+    fn encode_swap(
+        &self,
+        swap: Swap,
+        encoding_context: EncodingContext,
+    ) -> Result<Vec<u8>, EncodingError> {
+        let fee = get_static_attribute(&swap, "key_lp_fee")?;
+
+        let pool_fee_u24 = pad_to_fixed_size::<3>(&fee)
+            .map_err(|_| EncodingError::FatalError("Failed to pad fee bytes".to_string()))?;
+
+        let tick_spacing = get_static_attribute(&swap, "tick_spacing")?;
+
+        let pool_tick_spacing_u24 = pad_to_fixed_size::<3>(&tick_spacing).map_err(|_| {
+            EncodingError::FatalError("Failed to pad tick spacing bytes".to_string())
+        })?;
+
+        // Early check if this is not the first swap
+        if encoding_context.group_token_in != swap.token_in {
+            return Ok((bytes_to_address(&swap.token_out)?, pool_fee_u24, pool_tick_spacing_u24)
+                .abi_encode_packed());
+        }
+
+        // This is the first swap, compute all necessary values
+        let token_in_address = bytes_to_address(&swap.token_in)?;
+        let token_out_address = bytes_to_address(&swap.token_out)?;
+        let group_token_in_address = bytes_to_address(&encoding_context.group_token_in)?;
+        let group_token_out_address = bytes_to_address(&encoding_context.group_token_out)?;
+
+        let zero_to_one = Self::get_zero_to_one(token_in_address, token_out_address);
+        let callback_executor =
+            bytes_to_address(&Bytes::from_str(&self.executor_address).map_err(|_| {
+                EncodingError::FatalError("Invalid UniswapV4 executor address".into())
+            })?)?;
+
+        let pool_params =
+            (token_out_address, pool_fee_u24, pool_tick_spacing_u24).abi_encode_packed();
+
+        let args = (
+            group_token_in_address,
+            group_token_out_address,
+            zero_to_one,
+            callback_executor,
+            pool_params,
+        );
+
+        Ok(args.abi_encode_packed())
+    }
+
+    fn executor_address(&self) -> &str {
+        &self.executor_address
+    }
+
+    fn clone_box(&self) -> Box<dyn SwapEncoder> {
+        Box::new(self.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
